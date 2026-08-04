@@ -31,4 +31,4 @@ COPY . .
 RUN if [ ! -f setup.yml ]; then cp example.setup.yml setup.yml; fi
 
 # Comando padrão para rodar no Render
-CMD ["uv", "run", "example.py"]
+CMD [".venv/bin/python", "example.py"]
