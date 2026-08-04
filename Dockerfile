@@ -1,24 +1,34 @@
-# Use a Python 3.12 base image
-FROM python:3.12-slim-bookworm
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
+FROM python:3.12.8-slim
 
-# Set environment variables
-# Set this appropriately or leave empty if not using Discord
-ENV DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/xxxxxx"
+# Instala dependências do sistema (FFmpeg, etc)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install ffmpeg and Java
-# Install dependencies for moviepy
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends ffmpeg openjdk-17-jre locales && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    locale-gen C.UTF-8 && \
-    /usr/sbin/update-locale LANG=C.UTF-8
+# Instala o uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
-ENV LC_ALL=C.UTF-8
+WORKDIR /app
 
-# Set working directory
-ADD . /shorts_maker
+# Copia arquivos de dependência
+COPY pyproject.toml uv.lock ./
 
-RUN cd /shorts_maker && \
-    uv sync --frozen
+# Sincroniza dependências (CPU)
+RUN uv sync --extra cpu
+
+# ADICIONADO: Instala as bibliotecas necessárias para Scrape.do e Apify
+RUN uv pip install requests apify-client
+
+# Copia o resto do código
+COPY . .
+
+# Cria o arquivo setup.yml padrão se não existir
+RUN if [ ! -f setup.yml ]; then cp example.setup.yml setup.yml; fi
+
+# Comando padrão para rodar no Render
+CMD ["uv", "run", "example.py"]
