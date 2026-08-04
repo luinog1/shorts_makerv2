@@ -10,7 +10,6 @@ import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from ShortsMaker import MoviepyCreateVideo, ShortsMaker
 
 # Configuration
 SETUP_FILE = "setup.yml"
@@ -108,6 +107,10 @@ def run_pipeline():
     Main pipeline execution. Runs in a background thread.
     """
     try:
+        # IMPORTANTE: Importamos o ShortsMaker AQUI, não no topo do arquivo!
+        # Isso permite que o servidor HTTP abra a porta imediatamente antes do torch carregar.
+        from ShortsMaker import MoviepyCreateVideo, ShortsMaker
+        
         print("Iniciando pipeline de geração de vídeo...")
         with open(SETUP_FILE) as f:
             cfg = yaml.safe_load(f)
@@ -187,9 +190,10 @@ def run_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # 1. Inicia o pipeline de geração de vídeo em uma thread separada (background)
+    # 1. Inicia o servidor HTTP PRIMEIRO na thread principal para abrir a porta imediatamente
+    # 2. O pipeline de geração de vídeo roda em background
+    
     pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
     pipeline_thread.start()
     
-    # 2. Inicia o servidor HTTP na thread principal para manter o Render ativo
     run_server()
