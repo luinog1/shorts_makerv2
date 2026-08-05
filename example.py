@@ -314,31 +314,54 @@ def run_pipeline(reddit_url: str):
             log.warning("Modelo Whisper '%s' provavelmente vai causar OOM no Render free tier.", _model)
 
         # ---- LOG DE MEMORIA ATUAL ----
+        # Tenta psutil primeiro; fallback para /proc/meminfo (Linux always-on)
+        _mem_total_mb = 0
+        _mem_avail_mb = 0
+        _mem_percent = 0
         try:
             import psutil
             _mem = psutil.virtual_memory()
+            _mem_total_mb = _mem.total // (1024*1024)
+            _mem_avail_mb = _mem.available // (1024*1024)
+            _mem_percent = _mem.percent
+        except ImportError:
+            # Fallback: ler /proc/meminfo diretamente (Linux only, mas Render e Linux)
+            try:
+                with open("/proc/meminfo") as _pf:
+                    _lines = _pf.readlines()
+                _info = {}
+                for _line in _lines:
+                    _parts = _line.split(":")
+                    if len(_parts) == 2:
+                        _key = _parts[0].strip()
+                        _val = _parts[1].strip().split()[0]
+                        _info[_key] = int(_val)
+                _mem_total_mb = _info.get("MemTotal", 0) // 1024
+                _mem_avail_mb = (_info.get("MemAvailable", 0)
+                                or (_info.get("MemFree", 0)
+                                    + _info.get("Buffers", 0)
+                                    + _info.get("Cached", 0))) // 1024
+                if _mem_total_mb > 0:
+                    _mem_percent = round(100 * (1 - _mem_avail_mb / _mem_total_mb), 1)
+            except Exception as _e:
+                _append_log(f"[Pipeline] Nao foi possivel ler /proc/meminfo: {_e}")
+
+        if _mem_total_mb > 0:
             _append_log(
                 f"[Pipeline] Memoria do container: "
-                f"{_mem.total // (1024*1024)}MB total, "
-                f"{_mem.available // (1024*1024)}MB disponivel "
-                f"({_mem.percent}% em uso)"
+                f"{_mem_total_mb}MB total, "
+                f"{_mem_avail_mb}MB disponivel "
+                f"({_mem_percent}% em uso)"
             )
             # Alerta critico se disponivel < 1GB e modelo for pesado
-            if _mem.available < 1024*1024*1024 and _model in ("medium", "large", "large-v2", "large-v3"):
+            if _mem_avail_mb < 1024 and _model in ("medium", "large", "large-v2", "large-v3"):
                 raise Exception(
                     f"Memória insuficiente para o modelo '{_model}'. "
-                    f"Disponível: {_mem.available // (1024*1024)}MB. "
+                    f"Disponível: {_mem_avail_mb}MB. "
                     f"Necessário estimado: {_ram_est}. "
                     f"Troque o modelo no setup.yml para 'tiny', 'base' ou 'small', "
-                    f"ou faça upgrade do plano do Render (atual: free tier 512MB)."
+                    f"ou faça upgrade do plano do Render (atual: {_mem_total_mb}MB total)."
                 )
-        except ImportError:
-            _append_log("[Pipeline] psutil nao instalado - memoria nao reportada.")
-        except Exception as _e:
-            # Se for o erro critico de memoria, propaga; senao so loga
-            if "Memória insuficiente" in str(_e):
-                raise
-            _append_log(f"[Pipeline] Nao foi possivel checar memoria: {_e}")
 
         cache_dir = Path(cfg["cache_dir"])
         record_file = Path(cfg["reddit_post_getter"]["record_file_txt"])
