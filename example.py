@@ -287,6 +287,59 @@ def run_pipeline(reddit_url: str):
         with open(SETUP_FILE) as f:
             cfg = yaml.safe_load(f)
 
+        # ---- VALIDACAO PREVIA DE MODELO WHISPER ----
+        # Modelos large-v2/large-v3 precisam de ~3GB RAM; free tier do Render
+        # so tem 512MB. Avisar ANTES de tentar carregar (evita OOM kill silencioso).
+        _audio_cfg = cfg.get("audio", {}) or {}
+        _model = (_audio_cfg.get("model") or "").lower()
+        _device = (_audio_cfg.get("device") or "cpu").lower()
+        _MODEL_RAM_ESTIMATE = {
+            "tiny":   "150 MB",
+            "base":   "250 MB",
+            "small":  "500 MB",
+            "medium": "1.5 GB",
+            "large":  "3 GB",
+            "large-v2": "3 GB",
+            "large-v3": "3 GB",
+        }
+        _ram_est = _MODEL_RAM_ESTIMATE.get(_model, "desconhecido")
+        _append_log(f"[Pipeline] Modelo Whisper: '{_model}' (RAM estimada: {_ram_est})")
+        _append_log(f"[Pipeline] Device: {_device}")
+        if _model.startswith("large"):
+            _append_log(
+                "[Pipeline] ⚠ AVISO: modelo 'large' em CPU exige ~3GB RAM. "
+                "Render free tier tem 512MB — OOM kill provável. "
+                "Troque para 'tiny', 'base' ou 'small' no setup.yml."
+            )
+            log.warning("Modelo Whisper '%s' provavelmente vai causar OOM no Render free tier.", _model)
+
+        # ---- LOG DE MEMORIA ATUAL ----
+        try:
+            import psutil
+            _mem = psutil.virtual_memory()
+            _append_log(
+                f"[Pipeline] Memoria do container: "
+                f"{_mem.total // (1024*1024)}MB total, "
+                f"{_mem.available // (1024*1024)}MB disponivel "
+                f"({_mem.percent}% em uso)"
+            )
+            # Alerta critico se disponivel < 1GB e modelo for pesado
+            if _mem.available < 1024*1024*1024 and _model in ("medium", "large", "large-v2", "large-v3"):
+                raise Exception(
+                    f"Memória insuficiente para o modelo '{_model}'. "
+                    f"Disponível: {_mem.available // (1024*1024)}MB. "
+                    f"Necessário estimado: {_ram_est}. "
+                    f"Troque o modelo no setup.yml para 'tiny', 'base' ou 'small', "
+                    f"ou faça upgrade do plano do Render (atual: free tier 512MB)."
+                )
+        except ImportError:
+            _append_log("[Pipeline] psutil nao instalado - memoria nao reportada.")
+        except Exception as _e:
+            # Se for o erro critico de memoria, propaga; senao so loga
+            if "Memória insuficiente" in str(_e):
+                raise
+            _append_log(f"[Pipeline] Nao foi possivel checar memoria: {_e}")
+
         cache_dir = Path(cfg["cache_dir"])
         record_file = Path(cfg["reddit_post_getter"]["record_file_txt"])
         output_script_path = cache_dir / record_file
