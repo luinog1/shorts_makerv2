@@ -1,6 +1,6 @@
-FROM python:3.12.8-slim
+ROM python:3.12.8-slim
 
-# Instala dependências do sistema (FFmpeg, etc)
+# Instala dependencias do sistema (FFmpeg, etc)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsndfile1 \
@@ -15,20 +15,29 @@ ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app
 
-# Copia arquivos de dependência
+# Copia arquivos de dependencia
 COPY pyproject.toml uv.lock ./
 
-# Sincroniza dependências (CPU)
+# Sincroniza dependencias (CPU)
 RUN uv sync --extra cpu
 
-# ADICIONADO: Instala as bibliotecas necessárias para Scrape.do e Apify
-RUN uv pip install requests apify-client flask
+# ADICIONADO: Instala as bibliotecas necessarias para UI, Scrapers e diagnostico
+# - requests: Scrape.do e Apify
+# - apify-client: Apify scraper
+# - flask: web UI
+# - psutil: diagnostico de memoria (validacao de modelo Whisper)
+# - gunicorn: servidor WSGI de producao (substitui Flask dev server)
+RUN uv pip install requests apify-client flask psutil gunicorn
 
-# Copia o resto do código
+# Copia o resto do codigo
 COPY . .
 
-# Cria o arquivo setup.yml padrão se não existir
-RUN if [ ! -f setup.yml ]; then cp example.setup.yml setup.yml; fi
+# SEMPRE recria setup.yml a partir do example.setup.yml
+# (O setup.yml esta no .gitignore, entao nunca sobe para o repo.
+#  Sempre recomecamos com defaults para garantir estado limpo.)
+RUN rm -f setup.yml && cp example.setup.yml setup.yml
 
-# Comando padrão para rodar no Render
-CMD [".venv/bin/python", "example.py"]
+# Comando padrao para rodar no Render usando gunicorn (mais robusto que Flask dev server)
+# -w 1: apenas 1 worker (pipeline usa muita memoria, nao paralelize)
+# --timeout 120: tempo pra subir o processo (pode demorar pra importar libs)
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--timeout", "120", "example:app"]
