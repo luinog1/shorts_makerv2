@@ -1,4 +1,4 @@
-ROM python:3.12.8-slim
+FROM python:3.12.8-slim
 
 # Instala dependencias do sistema (FFmpeg, etc)
 RUN apt-get update && apt-get install -y \
