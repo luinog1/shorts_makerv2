@@ -161,6 +161,50 @@ def run_pipeline(reddit_url: str):
     )
 
     try:
+        # ===================================================================
+        # SHIM DE COMPATIBILIDADE torchaudio < 2.1 vs pyannote.audio
+        # ===================================================================
+        # pyannote.audio < 3.1 usa `torchaudio.AudioMetaData` como anotacao
+        # de tipo em core/io.py, mas torchaudio >= 2.1 removeu esse atributo.
+        # Sem isso, whisperx.load_model() quebra com AttributeError.
+        # Precisa rodar ANTES de importar ShortsMaker (que carrega pyannote).
+        # ===================================================================
+        _append_log("[Pipeline] Aplicando shim de compatibilidade torchaudio...")
+        try:
+            import torchaudio
+            if not hasattr(torchaudio, 'AudioMetaData'):
+                log.warning("torchaudio.AudioMetaData ausente. Aplicando shim...")
+                # Tenta importar da localizacao antiga primeiro
+                _AudioMetaData = None
+                for _path in (
+                    "torchaudio.backend.common.AudioMetaData",
+                    "torchaudio.backend.sox_io_backend.AudioMetaData",
+                ):
+                    try:
+                        mod_name, cls_name = _path.rsplit(".", 1)
+                        import importlib
+                        _mod = importlib.import_module(mod_name)
+                        if hasattr(_mod, cls_name):
+                            _AudioMetaData = getattr(_mod, cls_name)
+                            break
+                    except Exception:
+                        continue
+                # Fallback: classe minima so para a anotacao de tipo funcionar
+                if _AudioMetaData is None:
+                    class _AudioMetaData:
+                        def __init__(self, sample_rate=0, num_frames=0,
+                                     num_channels=0, bits_per_sample=0,
+                                     encoding=""):
+                            self.sample_rate = sample_rate
+                            self.num_frames = num_frames
+                            self.num_channels = num_channels
+                            self.bits_per_sample = bits_per_sample
+                            self.encoding = encoding
+                torchaudio.AudioMetaData = _AudioMetaData
+                _append_log("[Pipeline] Shim aplicado com sucesso.")
+        except ImportError:
+            _append_log("[Pipeline] torchaudio nao instalado ainda - shim pulado.")
+
         # Imports pesados AQUI (nao no modulo) para o Flask abrir a porta rapido
         log.info("Importando ShortsMaker (pode levar 30-60s)...")
         _append_log("[Pipeline] Importando bibliotecas pesadas...")
@@ -197,10 +241,25 @@ def run_pipeline(reddit_url: str):
         )
 
         _set_state(progress=60, message="Gerando transcrição...")
+        _append_log("[Pipeline] Chamando generate_audio_transcript...")
         shorts_maker.generate_audio_transcript(
             source_audio_file=f"{cfg['cache_dir']}/{cfg['audio']['output_audio_file']}",
             source_text_file=f"{cfg['cache_dir']}/{cfg['audio']['output_script_file']}",
         )
+
+        # ---- DETECCAO DE FALHA SILENCIOSA ----
+        # O decorator @retry do ShortsMaker engole excecoes e retorna None em
+        # alguns caminhos. Se word_transcript/line_transcript estao vazios,
+        # o pipeline travaria no create_video() abaixo. Abortamos aqui.
+        _wt = getattr(shorts_maker, 'word_transcript', None)
+        _lt = getattr(shorts_maker, 'line_transcript', None)
+        if not _wt and not _lt:
+            raise Exception(
+                "Transcrição vazia — generate_audio_transcript falhou silenciosamente. "
+                "Verifique se o modelo WhisperX foi baixado (HUGGING_FACE_HUB_TOKEN) "
+                "e se o cache/ não está corrompido."
+            )
+        _append_log("[Pipeline] Transcrição gerada com sucesso.")
         shorts_maker.quit()
 
         _set_state(progress=80, message="Renderizando vídeo...")
