@@ -1,5 +1,6 @@
 """
 ShortsMaker Advanced Web UI (Flask)
+- Scraper automatically fetches top post if no URL is provided.
 """
 
 import os
@@ -13,7 +14,7 @@ from flask import Flask, request, jsonify, send_file, Response, render_template_
 app = Flask(__name__)
 
 SETUP_FILE = "setup.yml"
-DEFAULT_REDDIT_URL = "https://www.reddit.com/r/Python/comments/1j36d7a/i_got_tired_of_ai_shorts_scams_so_i_built_my_own/"
+DEFAULT_SUBREDDIT = "AskReddit"
 
 PIPELINE_STATE = {
     "status": "idle",
@@ -24,41 +25,81 @@ PIPELINE_STATE = {
 }
 
 def get_reddit_post_via_scrapedo(url: str, output_file: Path) -> bool:
-    PIPELINE_STATE["logs"].append(f"[Scrape.do] Buscando: {url}")
-    json_url = url.rstrip('/') + '.json'
+    PIPELINE_STATE["logs"].append(f"[Scrape.do] Buscando dados...")
+    
+    # Se o usuário não colar URL, busca o top post do dia do subreddit
+    if not url:
+        json_url = f"https://www.reddit.com/r/{DEFAULT_SUBREDDIT}/top.json?t=day&limit=1"
+        PIPELINE_STATE["logs"].append(f"[Scrape.do] Sem URL. Buscando top post de r/{DEFAULT_SUBREDDIT}...")
+    else:
+        # Se colou URL, transforma em .json
+        json_url = url.rstrip('/') + '.json'
+        PIPELINE_STATE["logs"].append(f"[Scrape.do] Buscando URL específica...")
+
     api_url = "https://api.scrape.do/"
     params = {"token": os.environ.get("SCRAPEDO_API_KEY"), "url": json_url, "render": "false"}
+    
     try:
         response = requests.get(api_url, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
-        post_data = data[0]['data']['children'][0]['data']
+        
+        # O JSON do Reddit vem em formato de lista se for um post específico, ou dicionário se for lista de subreddit
+        if isinstance(data, list):
+            post_data = data[0]['data']['children'][0]['data']
+        else:
+            post_data = data['data']['children'][0]['data']
+            
         title = post_data.get('title', 'No Title')
         selftext = post_data.get('selftext', 'No Content')
-        script = f"{title}\n\n{selftext}"
+        
+        # Se for um post de AskReddit, muitas vezes não tem selftext (só título)
+        if not selftext:
+            script = title
+        else:
+            script = f"{title}\n\n{selftext}"
+            
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(script)
+            
+        PIPELINE_STATE["logs"].append(f"[Scrape.do] Post encontrado: {title[:50]}...")
         return True
+        
     except Exception as e:
         PIPELINE_STATE["logs"].append(f"[Scrape.do] Erro: {e}")
         return False
 
 def get_reddit_post_via_apify(url: str, output_file: Path) -> bool:
-    PIPELINE_STATE["logs"].append(f"[Apify] Buscando: {url}")
+    PIPELINE_STATE["logs"].append(f"[Apify] Buscando...")
     try:
         from apify_client import ApifyClient
         client = ApifyClient(os.environ.get("APIFY_API_TOKEN"))
-        run = client.actor("apify/reddit-scraper").call(run_input={
-            "startUrls": [{"url": url}], "maxItems": 1, "proxyConfiguration": {"useApifyProxy": True}
-        })
+        
+        # Se não tem URL, busca no Apify o top post
+        if not url:
+            run_input = {
+                "startUrls": [{"url": f"https://www.reddit.com/r/{DEFAULT_SUBREDDIT}/top/?t=day"}],
+                "maxItems": 1,
+                "proxyConfiguration": {"useApifyProxy": True}
+            }
+        else:
+            run_input = {
+                "startUrls": [{"url": url}],
+                "maxItems": 1,
+                "proxyConfiguration": {"useApifyProxy": True}
+            }
+            
+        run = client.actor("apify/reddit-scraper").call(run_input=run_input)
         dataset = client.dataset(run["defaultDatasetId"])
         posts = list(dataset.iterate_items())
+        
         if not posts: return False
         post = posts[0]
         title = post.get('title', 'No Title')
-        content = post.get('text', post.get('selftext', 'No Content'))
-        script = f"{title}\n\n{content}"
+        content = post.get('text', post.get('selftext', ''))
+        script = f"{title}\n\n{content}" if content else title
+        
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(script)
@@ -163,7 +204,7 @@ def start_pipeline():
     if PIPELINE_STATE["status"] == "running":
         return jsonify({"status": "error", "message": "Já está rodando."}), 400
         
-    reddit_url = request.args.get('url', DEFAULT_REDDIT_URL)
+    reddit_url = request.args.get('url', '').strip() # Se vier vazio, o scraper resolve
     thread = threading.Thread(target=run_pipeline, args=(reddit_url,), daemon=True)
     thread.start()
     return jsonify({"status": "success", "message": "Processo iniciado."})
@@ -200,8 +241,9 @@ HTML_PAGE = """
         .status-area { margin-top: 20px; padding: 15px; background: #e4e6eb; border-radius: 4px; }
         .progress { height: 8px; background: #ccc; border-radius: 4px; margin-top: 10px; overflow: hidden; }
         .progress-bar { height: 100%; background: #42b72a; width: 0%; transition: width 0.3s; }
-        .logs { margin-top: 15px; padding: 10px; background: #000; color: #0f0; height: 150px; overflow-y: scroll; font-family: monospace; font-size: 12px; border-radius: 4px; }
+        .logs { margin-top: 15px; padding: 10px; background: #000; color: #0f0; height: 150px; overflow-y: scroll; font-family: monospace; font-size: 12px; border-radius: 4px; white-space: pre-wrap; }
         .download-btn { background: #42b72a; text-decoration: none; display: inline-block; padding: 10px 20px; color: #fff; border-radius: 4px; }
+        .hint { font-size: 12px; color: #666; margin-top: -10px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -210,14 +252,16 @@ HTML_PAGE = """
         
         <div class="card">
             <h3>1. Configurações (setup.yml)</h3>
+            <span class="hint">Altere vozes, vídeos de fundo e velocidade aqui.</span>
             <textarea id="configText">{{ setup_content }}</textarea>
             <button onclick="saveConfig()" style="background: #ccc; color: black;">Salvar Config</button>
             
             <hr style="margin: 20px 0;">
             
             <h3>2. Gerar Vídeo</h3>
-            <label>URL do Reddit:</label>
-            <input type="text" id="redditUrl" placeholder="https://reddit.com/...">
+            <label>URL do Reddit (Opcional):</label>
+            <span class="hint">Deixe em branco para buscar o top post do dia de r/AskReddit automaticamente.</span>
+            <input type="text" id="redditUrl" placeholder="https://reddit.com/r/...">
             <button id="genBtn" onclick="startGen()">Iniciar Geração</button>
             
             <div class="status-area" id="statusArea">
