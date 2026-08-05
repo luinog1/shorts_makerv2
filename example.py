@@ -162,34 +162,42 @@ def run_pipeline(reddit_url: str):
 
     try:
         # ===================================================================
-        # SHIM DE COMPATIBILIDADE torchaudio < 2.1 vs pyannote.audio
+        # SHIM DE COMPATIBILIDADE torchaudio >= 2.1 vs pyannote.audio < 3.2
         # ===================================================================
-        # pyannote.audio < 3.1 usa `torchaudio.AudioMetaData` como anotacao
-        # de tipo em core/io.py, mas torchaudio >= 2.1 removeu esse atributo.
-        # Sem isso, whisperx.load_model() quebra com AttributeError.
-        # Precisa rodar ANTES de importar ShortsMaker (que carrega pyannote).
+        # torchaudio >= 2.1 removeu varios simbolos do namespace raiz que
+        # pyannote.audio < 3.2 ainda usa. Esta camada de shim restaura os
+        # que sabemos que faltam:
+        #   - torchaudio.AudioMetaData    (anotacao de tipo em pyannote .../io.py)
+        #   - torchaudio.list_audio_backends()  (chamado em pyannote .../io.py:__init__)
+        #   - torchaudio.info()           (fallback caso pyannote use)
+        #   - torchaudio.load()           (fallback caso pyannote use)
+        #
+        # IMPORTANTE: o shim so e necessario porque as versoes instaladas
+        # estao incompativeis. A solucao definitiva e pinar:
+        #   torch==2.0.1, torchaudio==2.0.2, pyannote.audio==3.0.1
+        # Veja CORRECOES-torchaudio.md.
         # ===================================================================
         _append_log("[Pipeline] Aplicando shim de compatibilidade torchaudio...")
         try:
             import torchaudio
+            import importlib
+
+            # ---- 1. AudioMetaData ----
             if not hasattr(torchaudio, 'AudioMetaData'):
                 log.warning("torchaudio.AudioMetaData ausente. Aplicando shim...")
-                # Tenta importar da localizacao antiga primeiro
                 _AudioMetaData = None
                 for _path in (
                     "torchaudio.backend.common.AudioMetaData",
                     "torchaudio.backend.sox_io_backend.AudioMetaData",
                 ):
                     try:
-                        mod_name, cls_name = _path.rsplit(".", 1)
-                        import importlib
-                        _mod = importlib.import_module(mod_name)
-                        if hasattr(_mod, cls_name):
-                            _AudioMetaData = getattr(_mod, cls_name)
+                        _mod_name, _cls_name = _path.rsplit(".", 1)
+                        _mod = importlib.import_module(_mod_name)
+                        if hasattr(_mod, _cls_name):
+                            _AudioMetaData = getattr(_mod, _cls_name)
                             break
                     except Exception:
                         continue
-                # Fallback: classe minima so para a anotacao de tipo funcionar
                 if _AudioMetaData is None:
                     class _AudioMetaData:
                         def __init__(self, sample_rate=0, num_frames=0,
@@ -201,7 +209,70 @@ def run_pipeline(reddit_url: str):
                             self.bits_per_sample = bits_per_sample
                             self.encoding = encoding
                 torchaudio.AudioMetaData = _AudioMetaData
-                _append_log("[Pipeline] Shim aplicado com sucesso.")
+                _append_log("[Pipeline] Shim AudioMetaData aplicado.")
+
+            # ---- 2. list_audio_backends ----
+            # torchaudio >= 2.1 removeu do namespace raiz; ainda existe em
+            # torchaudio.utils.sox_utils.list_audio_backends() ou via backend.
+            if not hasattr(torchaudio, 'list_audio_backends'):
+                log.warning("torchaudio.list_audio_backends ausente. Aplicando shim...")
+
+                def _list_audio_backends():
+                    """Retorna lista de backends disponiveis (shim)."""
+                    backends = []
+                    # Tenta os backends conhecidos um a um
+                    for _backend in ("ffmpeg", "sox", "soundfile", "sineio"):
+                        try:
+                            _mod = importlib.import_module(f"torchaudio.backend.{_backend}_backend")
+                            # Se importou sem erro, considera disponivel
+                            if hasattr(_mod, "load"):
+                                backends.append(_backend)
+                        except Exception:
+                            pass
+                    # soundfile e o fallback universal mais comum
+                    if not backends:
+                        try:
+                            import soundfile  # noqa: F401
+                            backends.append("soundfile")
+                        except ImportError:
+                            pass
+                    log.info("list_audio_backends() shim -> %s", backends)
+                    return backends
+
+                torchaudio.list_audio_backends = _list_audio_backends
+                _append_log("[Pipeline] Shim list_audio_backends aplicado.")
+
+            # ---- 3. info() e load() (defensivo, caso pyannote use) ----
+            if not hasattr(torchaudio, 'info'):
+                def _info(filepath, **kwargs):
+                    """Shim: usa soundfile para ler metadados."""
+                    import soundfile as sf
+                    info_obj = sf.info(filepath)
+                    # Retorna um objeto compativel com torchaudio.AudioMetaData
+                    return torchaudio.AudioMetaData(
+                        sample_rate=info_obj.samplerate,
+                        num_frames=info_obj.frames,
+                        num_channels=info_obj.channels,
+                        bits_per_sample=info_obj.subtype_bitdepth if hasattr(info_obj, 'subtype_bitdepth') else 16,
+                        encoding=info_obj.subtype,
+                    )
+                torchaudio.info = _info
+
+            if not hasattr(torchaudio, 'load'):
+                def _load(filepath, **kwargs):
+                    """Shim: usa soundfile para carregar audio."""
+                    import soundfile as sf
+                    import torch
+                    data, sr = sf.read(filepath, dtype="float32",
+                                       always_2d=True)
+                    # data vem como (frames, channels); torch espera (channels, frames)
+                    import numpy as np
+                    tensor = torch.from_numpy(np.transpose(data))
+                    return tensor, sr
+                torchaudio.load = _load
+
+            _append_log("[Pipeline] Shim torchaudio completo aplicado com sucesso.")
+
         except ImportError:
             _append_log("[Pipeline] torchaudio nao instalado ainda - shim pulado.")
 
