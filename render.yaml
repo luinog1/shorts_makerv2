@@ -1,4 +1,4 @@
-ervices:
+services:
   - type: web
     name: shorts-makerv2
     runtime: docker
