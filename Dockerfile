@@ -22,7 +22,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --extra cpu
 
 # ADICIONADO: Instala as bibliotecas necessárias para Scrape.do e Apify
-RUN uv pip install requests apify-client
+RUN uv pip install requests apify-client flask
 
 # Copia o resto do código
 COPY . .
